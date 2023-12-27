@@ -28,7 +28,7 @@ The most interesting thing is that the original feature itself seems to support 
 
 2. Enter to directory:
    ```
-   cd luks-uuid-root-master
+   cd luks-uuid-root
    ```
 
 3. Make install script ```install.sh``` executable:
