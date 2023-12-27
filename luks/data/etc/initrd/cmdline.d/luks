@@ -1,0 +1,7 @@
+register_array string LUKS_KEY
+register_parameter bool NO_LUKS
+register_parameter string LUKS_KEY_FORMAT
+register_array string LUKS_DEV
+register_array string LUKS_DISCARD
+register_array string LUKS_IGNORE
+register_parameter bool LUKS_CRYPTTAB 1

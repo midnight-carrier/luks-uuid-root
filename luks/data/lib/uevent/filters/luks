@@ -1,0 +1,60 @@
+#!/bin/bash
+
+. /.initrd/initenv
+. uevent-sh-functions
+. initrd-sh-functions
+
+[ -n "${DEVNAME-}" ] ||
+	exit 0
+
+DEVNAME="${DEVNAME#/dev}"
+DEVNAME="${DEVNAME#/}"
+DEVNAME="/dev/$DEVNAME"
+
+[ -z "${NO_LUKS-}" ] ||
+	exit 0
+
+[ "${ID_FS_TYPE-}" = "crypto_LUKS" ] ||
+	exit 0
+
+cryptsetup isLuks "$DEVNAME" ||
+	exit 0
+
+devluks=
+if [ -n "$LUKS_DEV" ] && [ "$LUKS_DEV" != 0 ]; then
+	i=0
+	while [ "$i" -lt "$LUKS_DEV" ]; do
+		dev=
+		eval "dev=\"\${LUKS_DEV$i-}\""
+		i=$(( $i + 1 ))
+		[ -n "$dev" ] &&
+			get_dev devluks "$dev" &&
+			break ||:
+	done
+elif [ -n "${LUKS_CRYPTTAB-}" ] && [ -s /etc/crypttab ]; then
+	. crypttab-sh-functions
+
+	crypttab_entry()
+	{
+		[ -n "${encryptdev-}" ] ||
+			return 0
+
+		get_dev devluks "$encryptdev" &&
+			return 1 ||:
+	}
+
+	shell_foreach_crypttab /etc/crypttab crypttab_entry ||:
+else
+	get_dev devluks "$DEVNAME" ||
+		exit 0
+fi
+
+[ -n "$devluks" ] ||
+	exit 0
+
+event="$(make_event)"
+environ -q > "$event"
+
+luksroot=/dev/disk/by-uuid/$(/sbin/blkid -s UUID -o value $devluks)
+echo "LUKS_ROOT='$luksroot'" >> "$event"
+release_event luks "$event"

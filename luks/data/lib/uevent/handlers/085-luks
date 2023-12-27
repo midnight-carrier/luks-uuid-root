@@ -1,0 +1,418 @@
+#!/bin/bash
+
+. /.initrd/initenv
+
+. shell-error
+. shell-var
+
+. uevent-sh-functions
+. initrd-sh-functions
+. rdshell-sh-functions
+. crypttab-sh-functions
+
+mnt="/mnt/luks-key"
+tab='	'
+pkcs11_luks_key="/tmp/pkcs11-luks.key"
+crypttab=/etc/crypttab
+
+match_dev_in_array() {
+	[ "$#" = 2 ] || return 2
+
+	local value array_name array_size
+
+	array_name="$1"
+	value="$2"
+
+	eval "array_size=\"\${$array_name-}\""
+
+	[ -n "$array_size" ] && [ "$array_size" != 0 ] ||
+		return 1
+
+	local i luksdev realdev
+
+	i=0
+	while [ "$i" -lt "$array_size" ]; do
+		eval "luksdev=\"\$$array_name$i\""
+		i=$(($i + 1))
+
+		realdev=
+		get_dev realdev "$luksdev"
+
+		[ "$realdev" != "$value" ] ||
+			return 0
+	done
+
+	return 1
+}
+
+read_pkcs11_key() {
+	local keyid="$1"
+
+	keyid=${keyid#pkcs11:}
+	keyid="${keyid%;};"
+
+	local serial id label application_label module type output_file flags rc=1
+	export id application_label module type output_file flags
+
+	while [ "$keyid" ]; do
+		local v="${keyid%%;*}"
+
+		case "$v" in
+			"serial="*|"id="*|"label="*) ;;
+			*) fatal "Unknown PKCS#11 object identifier" ;;
+		esac
+
+		local "${v%%=*}"="${v#*=}"
+
+		keyid="${keyid#*;}"
+	done
+
+	. smart-card
+
+	check_for_smart_card "$serial" || return 2
+
+	path="$pkcs11_luks_key"
+
+	id="${id-}"
+	application_label="$label"
+	module="$(get_pkcs11_module)"
+	type="data"
+	output_file="$path"
+	flags="-l -r"
+	if plymouth --ping 2>/dev/null; then
+		add_new_line="true"\
+		plymouth ask-for-password \
+                                --prompt "Please enter passphrase for smart card:" \
+                                --number-of-tries=3 \
+                                --command="pkcs11-tool-wrapper"
+		rc=$?
+	else
+		rc=1
+                while [ "$rc" != "0" ]; do
+			pkcs11-tool-wrapper
+			rc="$?"
+                done
+	fi
+
+	return "$rc"
+}
+
+freekey() {
+	[ -d "$mnt" ] && umount "$mnt" && rmdir "$mnt" ||:
+	rm -f "$pkcs11_luks_key"
+}
+
+findkey() {
+	local path keydev luksdev prefix s v
+
+	while IFS='' read -u 3 -r s; do
+		for n in path keydev luksdev; do
+			v=
+			if [ -n "$s" ] && [ -z "${s##*$tab*}" ]; then
+				v="${s%%$tab*}"
+				s="${s#*$tab}"
+			else
+				v="$s"
+				s=
+			fi
+			eval "$n=\"\$v\""
+		done
+	
+		if [ -z "$path" ]; then
+			message "ERROR: keypath required."
+			return 1
+		fi
+
+		if [ -n "$luksdev" ]; then
+			get_dev "$luksdev" ||
+				continue
+
+			[ "${luksdev#/dev/}" = "${LUKS_ROOT#/dev/}" ] || continue
+		fi
+
+
+		prefix=
+		if [ -n "$keydev" ]; then
+			mkdir -p -- "$mnt"
+			mount -r "$keydev" "$mnt" ||
+				exit 2
+			prefix=$mnt
+		fi
+
+		if [[ "$path" = "pkcs11:"* ]]; then
+			local pkcs11_id="$path"
+			# assign path variable inside
+			read_pkcs11_key "$pkcs11_id"
+			local rc=$?
+			[ "$rc" == "2" ] && message "No smart card found." && return $rc
+			[ "$rc" != "0" ] && message "ERROR: can't read key '$pkcs11_id' from smart card." && return $rc
+		fi
+
+		if [ ! -f "$prefix/$path" ]; then
+			message "ERROR: $path: keyfile not found."
+			return 1
+		fi
+
+		luks_keyfile="$prefix/$path"
+
+		message "Found keyfile '$path' for '${LUKS_ROOT#/dev/}' encrypted partition."
+		return 0
+
+	done 3< /etc/luks.keys
+
+	# Keyfile not found yet.
+	return 2
+}
+
+cryptsetup_ask_pass() {
+	local rc=0 tries=${luks_tries:-3}
+
+	{
+		printf 'exec cryptsetup'
+		printf ' %q' "$@"
+	} > /.initrd/cryptsetup-ask-pass
+
+	if plymouth --ping 2>/dev/null; then
+		plymouth ask-for-password \
+			--prompt "Please enter passphrase for $LUKS_ROOT:" \
+			--number-of-tries=$tries \
+			--command="bash /.initrd/cryptsetup-ask-pass"
+		rc="$?"
+	else
+		rc=2
+		# WARNING: Wait decrypt forever!
+		while [ "$rc" = 2 ] && [ "$tries" -ne 0 ]; do
+			bash /.initrd/cryptsetup-ask-pass
+			rc="$?"
+			tries=$(( $tries - 1 ))
+		done
+	fi
+
+	rm -f -- /.initrd/cryptsetup-ask-pass
+
+	return $rc
+}
+
+crypttab_entry() {
+	local o realdev=''
+
+	get_dev realdev "$encryptdev" ||
+		return 0
+
+	if [ -n "$volume" ] && [ -z "${volume##*/*}" ]; then
+		message "ERROR: volume name must not contain a slash(/): $volume"
+		return 1
+	fi
+
+	if [ -n "$keydev" ]; then
+		mkdir -p -- "$mnt"
+		mount -r "$keydev" "$mnt" ||
+			exit 2
+
+		keyfile="$mnt/$keyfile"
+
+		if [ ! -f "$keyfile" ]; then
+			message "ERROR: $keyfile: keyfile not found."
+			rc=1
+			return 1
+		fi
+	fi
+
+	luks_volume="$volume"
+
+	for o in "${options[@]}"; do
+		case "$o" in
+			plain|bitlk|tcrypt|luks)	luks_type="$o" ;;
+			tcrypt-hidden|tcrypthidden)	luks_type='tcrypt' ;;
+			tcrypt-system)			luks_type='tcrypt' ;;
+			tcrypt-veracrypt|veracrypt)	luks_type='tcrypt' ;;
+			tcrypt-keyfile=*)		luks_type='tcrypt' ;;
+		esac
+	done
+
+	for o in "${options[@]}"; do
+		case "$o" in
+			cipher=*)
+				in_list "$luks_type" luks tcrypt ||
+					luks_args+=("--cipher" "${o#*=}")
+				;;
+			hash=*)
+				in_list "$luks_type" luks tcrypt ||
+					luks_args+=("--hash" "${o#*=}")
+				;;
+			size=*)
+				in_list "$luks_type" luks tcrypt ||
+					luks_args+=("--size" "${o#*=}")
+				;;
+			keyfile-offset=*)
+				in_list "$luks_type" tcrypt ||
+					luks_args+=("--keyfile-offset" "${o#*=}")
+				;;
+			keyfile-size=*)
+				in_list "$luks_type" tcrypt plain ||
+					luks_args+=("--keyfile-size" "${o#*=}")
+				;;
+			try-empty-password|try-empty-password=*)
+				luks_empty_password=y
+				[ -n "${o##*=*}" ] || shell_var_is_yes "${o#*=}" ||
+					luks_empty_password=n
+				;;
+			headless|headless=*)
+				luks_headless=y
+				[ -n "${o##*=*}" ] || shell_var_is_yes "${o#*=}" ||
+					luks_headless=n
+				;;
+			tries=*)
+				luks_tries="${o#*=}"
+				[ "$luks_tries" != 0 ] || luks_tries=-1
+				;;
+			header=*)			luks_args+=("--header" "${o#*=}") ;;
+			tcrypt-keyfile=*)		luks_args+=("--key-file" "${o#*=}") ;;
+			keyslot=*|key-slot=*)		luks_args+=("--key-slot" "${o#*=}") ;;
+			offset=*)			luks_args+=("--offset" "${o#*=}") ;;
+			skip=*)				luks_args+=("--skip" "${o#*=}") ;;
+			sector-size=*)			luks_args+=("--sector-size" "${o#*=}") ;;
+			allow-discards|discard)		luks_args+=("--allow-discards") ;;
+			read-only|readonly)		luks_args+=("--readonly") ;;
+			same-cpu-crypt)			luks_args+=("--perf-same_cpu_crypt") ;;
+			submit-from-crypt-cpus)		luks_args+=("--perf-submit_from_crypt_cpus") ;;
+			no-read-workqueue)		luks_args+=("--perf-no_read_workqueue") ;;
+			no-write-workqueue)		luks_args+=("--perf-no_write_workqueue") ;;
+			tcrypt-system)			luks_args+=("--tcrypt-system") ;;
+			tcrypt-hidden|tcrypthidden)	luks_args+=("--tcrypt-hidden") ;;
+			tcrypt-veracrypt|veracrypt)	luks_args+=("--veracrypt") ;;
+			verify)				luks_args+=("--verify-passphrase") ;;
+		esac
+	done
+
+	#
+	# from crypttab(5):
+	#
+	# If the field is not present or is "none" or "-", a key file named
+	# after the volume to unlock (i.e. the first column of the line),
+	# suffixed with .key is automatically loaded from the
+	# /etc/cryptsetup-keys.d/ directory, if present.
+	#
+	case "$keyfile" in
+		''|'-'|'none')
+			keyfile="/etc/cryptsetup-keys.d/$luks_volume.key"
+			if [ ! -f "$keyfile" ]; then
+				message "luks keyfile was not specified and '$keyfile' was not found."
+			else
+				luks_keyfile="$keyfile"
+			fi
+			;;
+		/*)
+			if [ ! -f "$keyfile" ]; then
+				message "luks keyfile does not exist: $keyfile"
+			else
+				luks_keyfile="$keyfile"
+			fi
+			;;
+	esac
+
+	return 1
+}
+
+handler() {
+	local luks_volume="${LUKS_ROOT##*/}-luks" luks_args
+	local luks_tries=3 luks_keyfile='' luks_pipekey=n
+	local luks_headless=n luks_type=luks luks_empty_password=n
+
+	luks_args=()
+
+	! match_dev_in_array LUKS_IGNORE "$LUKS_ROOT" ||
+		exit 0
+
+	! match_dev_in_array LUKS_DISCARD "$LUKS_ROOT" ||
+		luks_args+=(--allow-discards)
+
+	local rc=0
+
+	#
+	# First of all, we check /etc/luks.keys, which is usually created from
+	# /proc/cmdline.
+	#
+	if [ -f /etc/luks.keys ]; then
+		message "$LUKS_ROOT: trying to find the keyfile in the '/etc/luks.keys'."
+		findkey
+		[ "${LUKS_KEY_FORMAT:-plain}" != plain ] ||
+			luks_pipekey=y
+		luks_headless=y
+	#
+	# Next, we check the crypttab that can be passed in at initramfs
+	# creation.
+	#
+	elif [ -n "${LUKS_CRYPTTAB-}" ] && [ -s "$crypttab" ]; then
+		message "$LUKS_ROOT: trying to find corresponding entry in the '$crypttab'."
+		shell_foreach_crypttab "$crypttab" crypttab_entry ||:
+	#
+	# Finally, we create the conditions for the password request.
+	#
+	else
+		rc=1
+	fi
+
+	# Skip if volume has already exist.
+	! dmsetup info "$luks_volume" >/dev/null 2>&1 ||
+		return 0
+
+	set -- "${luks_args[@]}" open --type "$luks_type" "$LUKS_ROOT" "$luks_volume"
+
+	#
+	# It doesn't matter where the key came from (from luks.keys or from
+	# crypttab). If we found it and the command to find it was successful,
+	# then we try to use it.
+	#
+	if [ -n "$luks_keyfile" ]; then
+		if shell_var_is_yes "$luks_pipekey"; then
+			cryptsetup -d- "$@" < "$luks_keyfile"
+		else
+			cryptsetup -d "$luks_keyfile" "$@"
+		fi
+		rc="$?"
+		freekey
+	else
+		message "The keyfile was not found for partition: $LUKS_ROOT"
+		rc=1
+	fi
+
+	if [ "$rc" -ne 0 ] && shell_var_is_no "$luks_headless"; then
+		if shell_var_is_yes "$luks_empty_password"; then
+			cryptsetup -d- "$@" </dev/null
+			rc="$?"
+		fi
+		if [ "$rc" -ne 0 ]; then
+			message "Trying to ask the user for a password."
+			cryptsetup_ask_pass "$@"
+			rc="$?"
+		fi
+	fi
+
+	if [ "$rc" -eq 0 ]; then
+		message "$luks_volume (upon $LUKS_ROOT) activated successfully."
+	else
+		fatal "ERROR: $LUKS_ROOT: unable to activate LUKS (rc=$rc)"
+	fi
+}
+
+while ! console_lock; do
+	sleep 0.5
+done
+
+exec 0</dev/console >/dev/console 2>&1
+
+rc=0
+for e in "$eventdir"/luks.*; do
+	[ -f "$e" ] || break
+	r=0
+	( . "$e"; handler; ) || r="$?"
+	case "$r" in
+		2) ;;
+		1) rc=1 ;;
+		0) done_event "$e" ;;
+	esac
+done
+
+console_unlock
+exit $rc

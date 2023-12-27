@@ -1,0 +1,45 @@
+#!/bin/bash
+
+. /.initrd/initenv
+. uevent-sh-functions
+. initrd-sh-functions
+
+split() {
+	local IFS=:
+	set -- $1
+	if [ "$1" = "pkcs11" ]; then
+		is_pkcs11='true'
+		path="$2"
+
+	else
+		path="$1"
+		keydev="${2-}"
+	fi
+
+	luksdev="${3-}"
+}
+
+[ -z "${NO_LUKS-}" ] ||
+	exit 0
+
+[ -n "$LUKS_KEY" ] && [ "$LUKS_KEY" != 0 ] ||
+	exit 0
+i=0
+while [ "$i" -lt "$LUKS_KEY" ]; do
+	path='' keydev='' luksdev='' is_pkcs11=''
+	eval "split \"\$LUKS_KEY$i\""
+	i=$(( $i + 1 ))
+
+	if [ -n "$is_pkcs11" ]; then
+		[ -n "$path" ] || continue
+		printf 'pkcs11:%s\t%s\t%s\n' "$path" "" "$luksdev"
+		continue
+	fi
+
+	[ -n "$keydev" ] ||
+		continue
+	realdev=
+	get_dev realdev "$keydev" ||
+		continue
+	printf '%s\t%s\t%s\n' "$path" "$realdev" "$luksdev"
+done >> /etc/luks.keys
