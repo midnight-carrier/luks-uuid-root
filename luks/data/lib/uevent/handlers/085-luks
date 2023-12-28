@@ -127,9 +127,8 @@ findkey() {
 			get_dev "$luksdev" ||
 				continue
 
-			[ "${luksdev#/dev/}" = "${LUKS_ROOT#/dev/}" ] || continue
+			[ "${luksdev#UUID=}" = "${LUKS_ROOT##*/}" -o "${luksdev##*/}" = "${LUKS_ROOT##*/}" ] || continue
 		fi
-
 
 		prefix=
 		if [ -n "$keydev" ]; then
@@ -155,7 +154,7 @@ findkey() {
 
 		luks_keyfile="$prefix/$path"
 
-		message "Found keyfile '$path' for '${LUKS_ROOT#/dev/}' encrypted partition."
+		message "Found keyfile '$path' for '${LUKS_ROOT}' encrypted partition."
 		return 0
 
 	done 3< /etc/luks.keys

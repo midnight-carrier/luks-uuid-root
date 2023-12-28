@@ -1,6 +1,8 @@
 #!/bin/sh
 
 prefix=/usr/share/make-initrd
+i=0
+
 if [ -n "$1" ]; then
 	prefix=$1
 fi
@@ -16,5 +18,13 @@ if [ ! -e $prefix ]; then
 fi
 
 chmod +x luks/bin/get-data luks/data/bin/crypttab-sh-functions luks/data/lib/initrd/cmdline.d/luks luks/data/lib/uevent/filters/* luks/data/lib/uevent/handlers/085-luks luks/guess/device
-mv $prefix/features/luks $prefix/features/luks-def
+if [ -e $prefix/features/luks ]; then
+	while [ 0 -ne 1 ]; do	
+		i=$(($i+1))
+		if [ ! -e $prefix/features/luks-def$i ]; then
+			mv $prefix/features/luks $prefix/features/luks-def$i
+			break
+		fi
+	done
+fi
 cp -r --preserve=mode luks $prefix/features/
