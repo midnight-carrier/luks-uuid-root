@@ -36,9 +36,13 @@ The most interesting thing is that the original feature itself seems to support 
    chmod +x ./install.sh
    ```
 
-4. Run script as root (by default ```prefix``` = ```/usr/share/make-initrd```):
+4. Run script as root:
    ```
-   sudo bash -c "./install.sh [prefix]"
+   sudo bash -c "./install.sh"
+   ```
+   You can specify the path to you make-initrd instance, by writing path as first argue of script. By default path = ```/usr/share/make-initrd```:
+   ```
+   sudo bash -c "./install [path]"
    ```
 
 5. Recompile ramdisk:
@@ -47,9 +51,12 @@ The most interesting thing is that the original feature itself seems to support 
    ```
 
 ## Usage
+> [!NOTE]
+> Starting from version **v1.1.0**, you can use ```UUID=``` prefix for specifying path to root partition.
+> ```/etc/luks.keys``` and boot kernel options for **v1.0.0** is fully compatible with **v1.1.0**.
+
 > [!WARNING]
-> This feature can perceive the **path** to the root partition, only using the UUID (e.g. ```/dev/disk/by-uuid/<UUID_of_encrypted_root>```).
-> Using the ```UUID=``` prefix for encrypted root will also not lead to unlocking the partition.
+> This feature can perceive the path to the root partition, only using the UUID (e.g. ```/dev/disk/by-uuid/<UUID_of_encrypted_root>``` or ```UUID=<UUID_of_encrypted_root>```).
 
 > [!WARNING]
 > Be very careful when composing the ```/etc/luks.keys``` file. This feature, like its parent, is very sensitive to spaces and tabs.
@@ -61,7 +68,7 @@ The use of this feature is almost compatible with the original documentation, ho
   - `<keypath>[:<keydev>][:<luksdev>]` key for luks device on removable device
     - `keypath` is a path to key file to look for from root of `keydev`.
     - `keydev` is a device on which key file resides.
-    - if `luksdev` is given, the specified key will only be applied for that LUKS device. When it is root partition, you should specify the path using the UUID: ```/dev/disk/by-uuid/<UUID_of_encrypted_root>```. Possible values are the same as for keydev. Unless you have several LUKS devices, you don’t have to specify this parameter.
+    - if `luksdev` is given, the specified key will only be applied for that LUKS device. When it is root partition, you should specify the path using the UUID: ```/dev/disk/by-uuid/<UUID_of_encrypted_root>``` or ```UUID=<UUID_of_encrypted_root>```. Possible values are the same as for keydev. Unless you have several LUKS devices, you don’t have to specify this parameter.
 
 
 
@@ -73,7 +80,7 @@ The file contains entries separated by a single tab character. Each entry descri
 key-path[<TAB>key-device[<TAB>luks-device]]
 ```
 ```key-path``` - this is the path from the ```key-device``` to the file that contains the key needed to unlock ```luks-device```.
-When ```luks-device``` is root partition, you need to specify path, using UUID of ```luks-device```: ```/dev/disk/by-uuid/<UUID_of_encrypted_root>```
+When ```luks-device``` is root partition, you need to specify path, using UUID of ```luks-device```: ```/dev/disk/by-uuid/<UUID_of_encrypted_root>``` or ```UUID=<UUID_of_encrypted_root>```.
 
 ### Examples
 Auto-unlock root using boot parametrs (keydev and root it's different devices):
@@ -84,4 +91,9 @@ luks-key=keys/luks.key:/dev/disk/by-uuid/5290c5a4-be85-439c-ad66-f2c29a63d51d:/d
 Auto-unlock root using /etc/luks.keys (keydev and root it's different devices):
 ```
 keys/luks.key  UUID=507a32b1-3082-4fe8-a69a-0c7a1c71808e  /dev/disk/by-uuid/d6fdca5e-5a04-4fa3-b8ae-236b0d2bc2ec
+```
+
+Auto-unlock root using /etc/luks.keys (keydev and root it's different devices):
+```
+keys/luks.key  UUID=507a32b1-3082-4fe8-a69a-0c7a1c71808e   UUID=d6fdca5e-5a04-4fa3-b8ae-236b0d2bc2ec
 ```
